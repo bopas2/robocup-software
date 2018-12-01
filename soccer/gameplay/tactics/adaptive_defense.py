@@ -27,6 +27,7 @@ import tactics.positions.submissive_defender as submissive_defender
 
 import evaluation.field
 import evaluation.linear_classification
+import evaluation.path
 
 class AdaptiveDefense(composite_behavior.CompositeBehavior):
 
@@ -138,7 +139,6 @@ class AdaptiveDefense(composite_behavior.CompositeBehavior):
         if self.debug:
             main.system_state().draw_text("Robot Risk: " + str(int(risk_score*100)), 
                 bot.pos - robocup.Point(0, 0.25), constants.Colors.White, "Defense: Risk")
-        
         return risk_score
 
     def calculate_area_risk_scores(self, bot):

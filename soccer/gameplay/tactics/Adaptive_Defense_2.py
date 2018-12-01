@@ -27,6 +27,7 @@ import tactics.positions.submissive_defender as submissive_defender
 
 import evaluation.field
 import evaluation.linear_classification
+import evaluation.path
 
 class AdaptiveDefense2(composite_behavior.CompositeBehavior):
 
@@ -54,7 +55,7 @@ class AdaptiveDefense2(composite_behavior.CompositeBehavior):
         super().__init__(continuous=True)
 
         # TODO: Change this to number of robots - 1
-        if len(defender_priorities) not >= 2 or len(defender_priorities not <= 5):
+        if len(defender_priorities) < 2 or len(defender_priorities > 5):
             raise RuntimeError(
                 "defender_priorities should have a length in between two to five inclusive")
 
@@ -77,7 +78,7 @@ class AdaptiveDefense2(composite_behavior.CompositeBehavior):
 
         self.debug = True
         self.kick_eval = robocup.KickEvaluator(main.system_state())
-        self.num_of_defenders = 6 # TODO: Make variable
+        self.num_of_defenders = len(defender_priorities) 
         self.robot_classes = [] # List of tuples of is_winger (!is_forward), class score, and robot obj
         self.agressiviness = 0 # Changes how to weight positioning on the wingers
 
@@ -111,14 +112,14 @@ class AdaptiveDefense2(composite_behavior.CompositeBehavior):
                                             AdaptiveDefense.WING_FORWARD_BIAS,
                                             AdaptiveDefense.WING_FORWARD_CUTOFF)
                 
-                self.robot_classes.append((is_wing, class_score, bot))
+                self.robot_classes.append((is_wing, class_score, bot, robot_risk_score + area_risk_score))
 
                 if self.debug and is_wing:
                     main.system_state().draw_circle(bot.pos, 0.5, constants.Colors.White, "Defense: Class Wing")
                 elif self.debug and not is_wing:
                     main.system_state().draw_circle(bot.pos, 0.5, constants.Colors.Black, "Defense: Class Forward")
 
-       
+
     def calculate_robot_risk_scores(self, bot):
         max_dist = robocup.Point(constants.Field.Length, constants.Field.Width).mag()
         our_goal = robocup.Point(0, 0)
@@ -129,6 +130,7 @@ class AdaptiveDefense2(composite_behavior.CompositeBehavior):
         ball_dist = pow(1 - dist_sens*(bot.pos- main.ball().pos).mag() / max_dist, 2)
         # How large the angle is between the ball, opponent, and goal, smaller angle is better
         ball_opp_goal = math.pow((math.fabs((main.ball().pos - bot.pos).angle_between(bot.pos - our_goal)) / math.pi), ball_opp_sens)
+        #
 
         risk_score = AdaptiveDefense.ROBOT_RISK_WEIGHTS[0] * ball_dist + \
                      AdaptiveDefense.ROBOT_RISK_WEIGHTS[1] * ball_opp_goal
@@ -140,7 +142,8 @@ class AdaptiveDefense2(composite_behavior.CompositeBehavior):
                 bot.pos - robocup.Point(0, 0.25), constants.Colors.White, "Defense: Risk")
         
         return risk_score
-
+    
+    # Danger based purely on the location of an enemy
     def calculate_area_risk_scores(self, bot):
         max_dist = robocup.Point(constants.Field.Length, constants.Field.Width).mag()
         our_goal = robocup.Point(0, 0)
@@ -166,6 +169,21 @@ class AdaptiveDefense2(composite_behavior.CompositeBehavior):
 
         return risk_score
 
+    def chance_to_score(self, bot, excluded_bots = []):
+        excluded_bots.append(bot)
+
+        passChance = evaluation.passing.eval_pass(
+            main.ball().pos, bot.pos, excluded_robots=excluded_bots)
+
+        self.kick_eval.excluded_robots.clear()
+        for r in excluded_bots:
+            self.kick_eval.add_excluded_robot(r)
+
+        point, shotChance = self.kick_eval.eval_pt_to_our_goal(bot.pos)
+
+        return passChance * shotChance
+
+
     def build_defensive_formation(self):
         # Using the offsets and the classifier, create the formation
         # based on the number of offenders on each side of the ball
@@ -179,6 +197,73 @@ class AdaptiveDefense2(composite_behavior.CompositeBehavior):
         # Each is a spring following F=kd
         pass
 
-    def apply_blocking_roles(self):
-        # Apply in order of ball -> strikers -> wingers -> ball
+    # Applies roles to each defender
+    def apply_blocking_roles(self, unassigned_handlers):
+        # Assume min 2 defenders, max 5 defenders are avaliable. 
+        direct_defenders = None
+        current_threat = None 
+        capture = False
+
+        # This block of code assigns one robot that is responsible for direct blocking!
+        # If the ball is moving
+        if (main.ball().vel.mag() > 0.4):
+            # If the ball is moving towards are goal, assume it is a shot and block it
+            if evaluation.ball.is_moving_towards_out_goal():
+                current_threat = main.ball();
+                direct_defenders = self.get_best_defender(unassigned_handlers)
+            # Otherwise, the ball is being passed.
+            else:
+                # If we can get to the ball before the enemy, CAPTURE IT!
+                if evaluation.path.can_collect_ball_before_opponent():
+                    capture = True
+                # Otherwise, we must directly block that bot
+                current_threat = self.determine_reciever();
+                direct_defenders = self.get_best_defender(unassigned_handlers)
+        else:
+            current_threat = evaluation.ball.robot_has_ball(r) for r in main.their_robots()
+
+        # This block of code assigns robots to dangerous areas of the field
+
+        # This block of code assigns remaining robots to direct blocking
+
+        # This block of code moves robots to their locations specified
         pass
+
+    # If the ball is being passed, determine who is recieving the pass
+    def determine_reciever(self): 
+        ball_travel_line = robocup.Line(main.ball().pos,
+                                        main.ball().pos + main.ball().vel)
+        most_likely_reciever = None 
+        smallest_angle = float("inf")
+        for opp in main.their_robots():
+            nearest_pt = ball_travel_line.nearest_point(opp.pos)
+            dx = (nearest_pt - main.ball().pos).mag()
+            dy = (opp.pos - nearest_pt).mag()
+            angle = abs(math.atan2(dy, dx))
+            if angle < smallest_angle:
+                smallest_angle = angle
+                most_likely_reciever = opp
+        return most_likely_reciever
+
+    # Assign the best defender to block the incoming ball
+    # Score based on how close the defender is to the goal (more reaction time)
+    # And based on how much the defender is already in the way of the ball.
+    def get_best_defender(self, possible_defenders):
+        ball_travel_line = robocup.Line(main.ball().pos,
+                                        main.ball().pos + main.ball().vel)
+        our_goal = robocup.Point(0, 0)
+        bestDefender = possible_defenders[0]
+        bestDefenderScore = float("inf") # looking to minimize the score
+        bestIndex = 0;
+        for indx, defender in enumerate(possible_defenders):
+            nearest_pt = ball_travel_line.nearest_point(defender.pos)
+            dx = (nearest_pt - main.ball().pos).mag()
+            dy = (defender.pos - nearest_pt).mag()
+            angle = abs(math.atan2(dy, dx))
+            defender_score = (angle) * (defender.pos - our_goal).mag();
+            if  defender_score < bestDefenderScore:
+                bestDefender = defender
+                bestDefenderScore = defender_score
+                bestIndex = indx
+        del possible_defenders[bestIndex]
+        return bestDefender
